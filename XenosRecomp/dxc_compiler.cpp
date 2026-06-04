@@ -54,7 +54,11 @@ IDxcBlob* DxcCompiler::compile(const std::string& shaderSource, bool compilePixe
 
     args[argCount++] = L"-Qstrip_debug";
 
-#ifdef UNLEASHED_RECOMP
+    // Keep the HLSL preprocessor in step with how this tool was built so
+    // shader_common.h selects the matching constant layout.
+#ifdef REBLUE_RECOMP
+    args[argCount++] = L"-DREBLUE_RECOMP";
+#elif defined(UNLEASHED_RECOMP)
     args[argCount++] = L"-DUNLEASHED_RECOMP";
 #endif
 

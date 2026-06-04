@@ -18,11 +18,21 @@ static constexpr const char* USAGE_TYPES[] =
     "float4", // POSITION
     "float4", // BLENDWEIGHT
     "uint4", // BLENDINDICES
+#ifdef REBLUE_RECOMP
+    // BD IA-decodes SNORM normals to float; swapFloats() undoes the engine int16-pair swap, DEC3N goes through tfetchR11G11B10().
+    "float4", // NORMAL
+#else
     "uint4", // NORMAL
+#endif
     "float4", // PSIZE
     "float4", // TEXCOORD
+#ifdef REBLUE_RECOMP
+    "float4", // TANGENT
+    "float4", // BINORMAL
+#else
     "uint4", // TANGENT
     "uint4", // BINORMAL
+#endif
     "float4", // TESSFACTOR
     "float4", // POSITIONT
     "float4", // COLOR
@@ -179,6 +189,34 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
     auto findResult = vertexElements.find(address);
     assert(findResult != vertexElements.end());
 
+#ifdef REBLUE_RECOMP
+    // Wrap each 16-bit-packed semantic in swapFloats() (per-usage mask); TEXCOORD also runs sintTexcoord() for raw-int bindings.
+    switch (findResult->second.usage)
+    {
+    case DeclUsage::Normal:
+        specConstantsMask |= SPEC_CONSTANT_R11G11B10_NORMAL;
+        print("tfetchR11G11B10(swapFloats(g_SwappedNormals, ");
+        break;
+    case DeclUsage::Tangent:
+        specConstantsMask |= SPEC_CONSTANT_R11G11B10_NORMAL;
+        print("tfetchR11G11B10(swapFloats(g_SwappedTangents, ");
+        break;
+    case DeclUsage::Binormal:
+        specConstantsMask |= SPEC_CONSTANT_R11G11B10_NORMAL;
+        print("tfetchR11G11B10(swapFloats(g_SwappedBinormals, ");
+        break;
+    case DeclUsage::BlendWeight:
+        print("swapFloats(g_SwappedBlendWeights, ");
+        break;
+    case DeclUsage::TexCoord:
+        specConstantsMask |= SPEC_CONSTANT_SINT_TEXCOORD;
+        print("sintTexcoord(g_SintTexcoords, swapFloats(g_SwappedTexcoords, ");
+        break;
+    case DeclUsage::Position:
+        print("swapFloats(g_SwappedPositions, ");
+        break;
+    }
+#else
     switch (findResult->second.usage)
     {
     case DeclUsage::Normal:
@@ -192,9 +230,30 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
         print("tfetchTexcoord(g_SwappedTexcoords, ");
         break;
     }
+#endif
 
     print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
 
+#ifdef REBLUE_RECOMP
+    switch (findResult->second.usage)
+    {
+    case DeclUsage::Normal:
+    case DeclUsage::Tangent:
+    case DeclUsage::Binormal:
+        print(", {}))", uint32_t(findResult->second.usageIndex));
+        break;
+
+    case DeclUsage::TexCoord:
+        print(", {}), {})", uint32_t(findResult->second.usageIndex),
+              uint32_t(findResult->second.usageIndex));
+        break;
+
+    case DeclUsage::BlendWeight:
+    case DeclUsage::Position:
+        print(", {})", uint32_t(findResult->second.usageIndex));
+        break;
+    }
+#else
     switch (findResult->second.usage)
     {
     case DeclUsage::Normal:
@@ -207,6 +266,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
         print(", {})", uint32_t(findResult->second.usageIndex));
         break;
     }
+#endif
 
     out += '.';
     printDstSwizzle(instr.dstSwizzle, true);
@@ -949,7 +1009,12 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             break;
 
         case AluScalarOpcode::SetpInv:
+#ifdef REBLUE_RECOMP
+            // PRED_SETINV: src==1 -> 0, src==0 -> 1, else passthrough.
+            print("{0} == 1.0 ? 0.0 : ({0} == 0.0 ? 1.0 : {0})", op(SCALAR_0));
+#else
             print("{0} == 0.0 ? 1.0 : {0}", op(SCALAR_0));
+#endif
             break;
 
         case AluScalarOpcode::SetpPop:
@@ -1163,8 +1228,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     constantName, shaderName, constantInfo->registerIndex * 16);
             }
             
+#ifdef REBLUE_RECOMP
+            // BD aliases a singleton constant over an array slot; the wider registrant wins so body and cbuffer agree.
+            for (uint16_t j = 0; j < constantInfo->registerCount; j++)
+            {
+                uint32_t reg = constantInfo->registerIndex + j;
+                auto it = float4Constants.find(reg);
+                if (it == float4Constants.end() || it->second->registerCount < constantInfo->registerCount)
+                    float4Constants[reg] = constantInfo;
+            }
+#else
             for (uint16_t j = 0; j < constantInfo->registerCount; j++)
                 float4Constants.emplace(constantInfo->registerIndex + j, constantInfo);
+#endif
 
             break;
         }
@@ -1187,6 +1263,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         }
     }
 
+#ifdef REBLUE_RECOMP
+    // BD bodies reference unnamed sampler slots; emit fallback descriptor-index defines for any slot 0..15 the table didn't name.
+    for (uint32_t r = 0; r < 16; r++)
+    {
+        if (samplers.find(r) != samplers.end())
+            continue;
+        for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
+        {
+            println("#define s{}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
+                r, TEXTURE_DIMENSIONS[j], j * 64 + r * 4);
+        }
+        println("#define s{}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
+            r, std::size(TEXTURE_DIMENSIONS) * 64 + r * 4);
+    }
+#endif
+
     out += "\n#else\n\n";
 
     println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
@@ -1199,6 +1291,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
         if (constantInfo->registerSet == RegisterSet::Float4)
         {
+#ifdef REBLUE_RECOMP
+            // Only the alias winner gets a packoffset slot; a loser would overlap it in the cbuffer and fail DXC.
+            auto winner = float4Constants.find(constantInfo->registerIndex);
+            if (winner == float4Constants.end() || winner->second != constantInfo)
+                continue;
+#endif
+
             const char* constantName = reinterpret_cast<const char*>(constantTableData + constantInfo->name);
 
             print("\tfloat4 {}", constantName);
@@ -1241,6 +1340,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         }
     }
 
+#ifdef REBLUE_RECOMP
+    // Mirror the SPIR-V fallback: packoffset slots for any unnamed sampler index 0..15.
+    for (uint32_t r = 0; r < 16; r++)
+    {
+        if (samplers.find(r) != samplers.end())
+            continue;
+        for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
+        {
+            println("\tuint s{}_Texture{}DescriptorIndex : packoffset(c{}.{});",
+                r, TEXTURE_DIMENSIONS[j], j * 4 + r / 4, SWIZZLES[r % 4]);
+        }
+        println("\tuint s{}_SamplerDescriptorIndex : packoffset(c{}.{});",
+            r, 4 * std::size(TEXTURE_DIMENSIONS) + r / 4, SWIZZLES[r % 4]);
+    }
+#endif
+
     out += "\tDEFINE_SHARED_CONSTANTS();\n";
     out += "};\n\n";
 
@@ -1254,8 +1369,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         if (constantInfo->registerSet == RegisterSet::Bool)
         {
             const char* constantName = reinterpret_cast<const char*>(constantTableData + constantInfo->name);
+#ifdef REBLUE_RECOMP
+            // Key named bools by the unified VS(0..127)/PS(128..255) bit so CF tests (also unified) resolve them.
+            const uint32_t unifiedBit = uint32_t(constantInfo->registerIndex) + (isPixelShader ? 128u : 0u);
+            println("\t#define {} BOOL_BIT({})", constantName, unifiedBit);
+            boolConstants.emplace(unifiedBit, constantName);
+#else
             println("\t#define {} (1 << {})", constantName, constantInfo->registerIndex + (isPixelShader ? 16 : 0));
             boolConstants.emplace(constantInfo->registerIndex, constantName);
+#endif
         }
     }
 
@@ -1324,6 +1446,10 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
             out += '\t';
 
+#ifdef REBLUE_RECOMP
+            // SPIR-V needs every input tagged; the host reads bindings back from SPIR-V so the numbers aren't load-bearing.
+            print("[[vk::location({})]] ", i);
+#else
             for (auto& usageLocation : USAGE_LOCATIONS)
             {
                 if (usageLocation.usage == vertexElement.usage && usageLocation.usageIndex == vertexElement.usageIndex)
@@ -1332,6 +1458,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     break;
                 }
             }
+#endif
 
             println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
                 uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
@@ -1446,9 +1573,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
     if (!isPixelShader)
     {
-    #ifdef UNLEASHED_RECOMP
+    #if defined(UNLEASHED_RECOMP)
         if (!hasMtxProjection)
             out += "\toPos = 0.0;\n";
+    #elif defined(REBLUE_RECOMP)
+        // Always define SV_Position so a skipped position-write block doesn't leave it undef.
+        out += "\toPos = 0.0;\n";
     #endif
 
         for (auto& [usage, usageIndex] : INTERPOLATORS)
@@ -1630,7 +1760,25 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                 address = cfInstr.condExec.address;
                 count = cfInstr.condExec.count;
                 sequence = cfInstr.condExec.sequence;
+#ifdef REBLUE_RECOMP
+                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd ||
+                                cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd);
+                // Gate the block on its boolean constant (Xenos cexec bN / cexec !bN); baseline ran it unconditionally.
+                {
+                    indent();
+                    auto findResult = boolConstants.find(cfInstr.condExec.boolAddress);
+                    if (findResult != boolConstants.end())
+                        println("if ({}{})", cfInstr.condExec.condition ? "" : "!", findResult->second);
+                    else
+                        println("if ({}BOOL_BIT({}))", cfInstr.condExec.condition ? "" : "!", uint32_t(cfInstr.condExec.boolAddress));
+                    indent();
+                    out += "{\n";
+                    ++indentation;
+                    shouldCloseCurlyBracket = true;
+                }
+#else
                 shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
+#endif
                 break;
 
             case ControlFlowOpcode::CondExecPred:
@@ -1694,11 +1842,21 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                     }
                     else
                     {
+#ifdef REBLUE_RECOMP
+                        // Bools expand to BOOL_BIT(N) expressions; negate when the jump fires on a clear bit.
+                        const bool jumpIfSet = cfInstr.condJmp.condition ^ simpleControlFlow;
+                        auto findResult = boolConstants.find(cfInstr.condJmp.boolAddress);
+                        if (findResult != boolConstants.end())
+                            println("if ({}{})", jumpIfSet ? "" : "!", findResult->second);
+                        else
+                            println("if ({}BOOL_BIT({}))", jumpIfSet ? "" : "!", uint32_t(cfInstr.condJmp.boolAddress));
+#else
                         auto findResult = boolConstants.find(cfInstr.condJmp.boolAddress);
                         if (findResult != boolConstants.end())
                             println("if ((g_Booleans & {}) {}= 0)", findResult->second, cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
                         else
                             println("if (b{} {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+#endif
                     }
 
                     if (simpleControlFlow)
