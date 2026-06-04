@@ -10,6 +10,11 @@
     #define SPEC_CONSTANT_REVERSE_Z         (1 << 4)
 #endif
 
+#ifdef REBLUE_RECOMP
+    // Recover raw int16 TEXCOORDs from R16G16(B16A16)_UINT bindings.
+    #define SPEC_CONSTANT_SINT_TEXCOORD     (1 << 2)
+#endif
+
 #if !defined(__cplusplus) || defined(__INTELLISENSE__)
 
 #define FLT_MIN asfloat(0xff7fffff)
@@ -26,10 +31,24 @@ struct PushConstants
 
 [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
 
+#ifdef REBLUE_RECOMP
+// 256-bit boolean register file (BD bool addresses reach ~158), then per-usage 16-bit-pair swap masks.
+#define g_Booleans(i)              vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256 + (i)*4)
+#define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 288)
+#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 292)
+#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 300)
+#define g_SwappedNormals           vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 304)
+#define g_SwappedBinormals         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 308)
+#define g_SwappedTangents          vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 312)
+#define g_SwappedBlendWeights      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 316)
+#define g_SwappedPositions         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 320)
+#define g_SintTexcoords            vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 324)
+#else
 #define g_Booleans                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256)
 #define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
 #define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264)
 #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)
+#endif
 
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 
@@ -37,14 +56,35 @@ struct PushConstants
 
 #else
 
+#ifdef REBLUE_RECOMP
+#define DEFINE_SHARED_CONSTANTS() \
+    uint4 g_BooleansArr[2] : packoffset(c16); \
+    uint g_SwappedTexcoords : packoffset(c18.x); \
+    float2 g_HalfPixelOffset : packoffset(c18.y); \
+    float g_AlphaThreshold : packoffset(c18.w); \
+    uint g_SwappedNormals : packoffset(c19.x); \
+    uint g_SwappedBinormals : packoffset(c19.y); \
+    uint g_SwappedTangents : packoffset(c19.z); \
+    uint g_SwappedBlendWeights : packoffset(c19.w); \
+    uint g_SwappedPositions : packoffset(c20.x); \
+    uint g_SintTexcoords : packoffset(c20.y);
+
+#define g_Booleans(i) (g_BooleansArr[(i) / 4][(i) % 4])
+#else
 #define DEFINE_SHARED_CONSTANTS() \
     uint g_Booleans : packoffset(c16.x); \
     uint g_SwappedTexcoords : packoffset(c16.y); \
     float2 g_HalfPixelOffset : packoffset(c16.z); \
     float g_AlphaThreshold : packoffset(c17.x);
+#endif
 
 uint g_SpecConstants();
 
+#endif
+
+#ifdef REBLUE_RECOMP
+// Test Xenos boolean register N in the unified VS(0..127)/PS(128..255) file.
+#define BOOL_BIT(n) ((g_Booleans((n) / 32u) & (1u << ((n) & 31u))) != 0)
 #endif
 
 Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
@@ -159,6 +199,39 @@ float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, flo
     return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
 }
 
+#ifdef REBLUE_RECOMP
+// DEC3N normal decode; IA binds as R32_UINT so lane .x carries the raw bits (asuint recovers them).
+float4 tfetchR11G11B10(float4 value)
+{
+    if (g_SpecConstants() & SPEC_CONSTANT_R11G11B10_NORMAL)
+    {
+        uint v = asuint(value.x);
+        return float4(
+            (v & 0x00000400 ? -1.0 : 0.0) + ((v & 0x3FF) / 1024.0),
+            (v & 0x00200000 ? -1.0 : 0.0) + (((v >> 11) & 0x3FF) / 1024.0),
+            (v & 0x80000000 ? -1.0 : 0.0) + (((v >> 22) & 0x1FF) / 512.0),
+            0.0);
+    }
+    return value;
+}
+
+// Undo the engine bswap32 16-bit-pair swap (.yxwz) for any 16-bit-packed semantic flagged in the mask.
+float4 swapFloats(uint swappedMask, float4 value, uint semanticIndex)
+{
+    return (swappedMask & (1u << semanticIndex)) != 0 ? value.yxwz : value;
+}
+
+// Recover X360 integer-cast-to-float TEXCOORDs from R16G16(B16A16)_UINT bindings (sign-extend low 16 bits).
+float4 sintTexcoord(uint mask, float4 value, uint semanticIndex)
+{
+    if ((mask & (1u << semanticIndex)) != 0)
+    {
+        int4 si = (int4(asuint(value)) << 16) >> 16;
+        return float4(si);
+    }
+    return value;
+}
+#else
 float4 tfetchR11G11B10(uint4 value)
 {
     if (g_SpecConstants() & SPEC_CONSTANT_R11G11B10_NORMAL)
@@ -179,6 +252,7 @@ float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
 {
     return (swappedTexcoords & (1ull << semanticIndex)) != 0 ? value.yxwz : value;
 }
+#endif
 
 float4 cube(float4 value, inout CubeMapData cubeMapData)
 {
