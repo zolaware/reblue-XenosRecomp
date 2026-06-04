@@ -2,6 +2,9 @@
 #include "shader_recompiler.h"
 #include "dxc_compiler.h"
 
+#include <mutex>
+#include <vector>
+
 static std::unique_ptr<uint8_t[]> readAllBytes(const char* filePath, size_t& fileSize)
 {
     FILE* file = fopen(filePath, "rb");
@@ -28,6 +31,16 @@ struct RecompiledShader
     std::vector<uint8_t> spirv;
     uint32_t specConstantsMask = 0;
 };
+
+// Per-shader recompile failures, collected from the parallel loop and reported before exit.
+struct ShaderFailure
+{
+    XXH64_hash_t hash;
+    std::string reason;
+};
+
+static std::mutex g_failureMutex;
+static std::vector<ShaderFailure> g_failures;
 
 int main(int argc, char** argv)
 {
@@ -118,6 +131,13 @@ int main(int argc, char** argv)
         std::for_each(std::execution::par_unseq, shaders.begin(), shaders.end(), [&](auto& hashShaderPair)
             {
                 auto& shader = hashShaderPair.second;
+                const XXH64_hash_t hash = hashShaderPair.first;
+
+                auto recordFailure = [hash](const char* reason)
+                {
+                    std::lock_guard<std::mutex> lock(g_failureMutex);
+                    g_failures.push_back({hash, reason});
+                };
 
                 thread_local ShaderRecompiler recompiler;
                 recompiler = {};
@@ -129,15 +149,31 @@ int main(int argc, char** argv)
 
 #ifdef XENOS_RECOMP_DXIL
                 shader.dxil = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, recompiler.specConstantsMask != 0, false);
-                assert(shader.dxil != nullptr);
-                assert(*(reinterpret_cast<uint32_t *>(shader.dxil->GetBufferPointer()) + 1) != 0 && "DXIL was not signed properly!");
+                if (shader.dxil == nullptr)
+                {
+                    recordFailure("dxc-dxil-compile-failed");
+                    return;
+                }
+                if (*(reinterpret_cast<uint32_t*>(shader.dxil->GetBufferPointer()) + 1) == 0)
+                {
+                    recordFailure("dxil-not-signed");
+                    return;
+                }
 #endif
 
                 IDxcBlob* spirv = dxcCompiler.compile(recompiler.out, recompiler.isPixelShader, false, true);
-                assert(spirv != nullptr);
+                if (spirv == nullptr)
+                {
+                    recordFailure("dxc-spirv-compile-failed");
+                    return;
+                }
 
-                bool result = smolv::Encode(spirv->GetBufferPointer(), spirv->GetBufferSize(), shader.spirv, smolv::kEncodeFlagStripDebugInfo);
-                assert(result);
+                if (!smolv::Encode(spirv->GetBufferPointer(), spirv->GetBufferSize(), shader.spirv, smolv::kEncodeFlagStripDebugInfo))
+                {
+                    spirv->Release();
+                    recordFailure("smolv-encode-failed");
+                    return;
+                }
 
                 spirv->Release();
 
@@ -145,6 +181,14 @@ int main(int argc, char** argv)
                 if ((currentProgress % 10) == 0 || (currentProgress == shaders.size() - 1))
                     fmt::println("Recompiling shaders... {}%", currentProgress / float(shaders.size()) * 100.0f);
             });
+
+        if (!g_failures.empty())
+        {
+            fmt::println(stderr, "Recompile failures ({}):", g_failures.size());
+            for (const auto& failure : g_failures)
+                fmt::println(stderr, "  hash=0x{:016X} reason={}", failure.hash, failure.reason);
+            return 2;
+        }
 
         fmt::println("Creating shader cache...");
 
