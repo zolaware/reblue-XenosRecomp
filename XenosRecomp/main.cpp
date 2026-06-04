@@ -193,7 +193,11 @@ int main(int argc, char** argv)
         fmt::println("Creating shader cache...");
 
         StringBuffer f;
+#ifdef REBLUE_RECOMP
+        f.println("#include \"bdengine/gpu/shader_cache.h\"");
+#else
         f.println("#include \"shader_cache.h\"");
+#endif
         f.println("ShaderCacheEntry g_shaderCacheEntries[] = {{");
 
         std::vector<uint8_t> dxil;
