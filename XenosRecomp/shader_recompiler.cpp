@@ -824,8 +824,18 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
             break;
 
         case AluVectorOpcode::Cube:
-            print("cube(r{}, cubeMapData)", instr.src1Register);
+        {
+            // Xenos cube takes the direction from src1's swizzled lanes (z, w, x);
+            // the canonical emit is src.zzxy which makes this src.xyz, but other
+            // compilers emit e.g. src.yyzx (Blue Dragon), so honor the swizzle.
+            const uint32_t reg = instr.src1Register & 0x3F;
+            const bool srcAbs = (instr.src1Register & 0x80) != 0;
+            auto lane = [&](uint32_t i) { return SWIZZLES[((instr.src1Swizzle >> (i * 2)) + i) & 0x3]; };
+            print("cube({}{}r{}.{}{}{}{}{}, cubeMapData)",
+                instr.src1Negate ? "-" : "", srcAbs ? "abs(" : "", reg,
+                lane(2), lane(3), lane(0), lane(0), srcAbs ? ")" : "");
             break;
+        }
 
         case AluVectorOpcode::Max4:
             print("max4({})", op(VECTOR_0));
