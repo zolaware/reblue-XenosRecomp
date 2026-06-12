@@ -190,7 +190,14 @@ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
 
 struct CubeMapData
 {
+	#ifdef REBLUE_RECOMP
+    // BD's cube-shadow PCF issues up to 9 cube ops per shader (bd_mirror_cs_ps /
+    // bd_glass_cs_ps); overflowing this array drops the stored directions and
+    // every tfetchCube reads OOB -> point-light shadows vanish.
+    float3 cubeMapDirections[9];
+    #else
     float3 cubeMapDirections[2];
+    #endif
     uint cubeMapIndex;
 };
 
