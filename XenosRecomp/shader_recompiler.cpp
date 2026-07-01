@@ -1195,12 +1195,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
     bool hasIndexCount = false;
 #endif
 
+#ifdef REBLUE_RECOMP
+    bool hasShadowTexture = false;
+#endif
+
     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
     {
         const auto constantInfo = reinterpret_cast<const ConstantInfo*>(
             constantTableData + constantTableContainer->constantTable.constantInfo + i * sizeof(ConstantInfo));
 
         const char* constantName = reinterpret_cast<const char*>(constantTableData + constantInfo->name);
+
+#ifdef REBLUE_RECOMP
+        if (isPixelShader && constantInfo->registerSet == RegisterSet::Sampler &&
+            strcmp(constantName, "ShadowTexture") == 0)
+        {
+            hasShadowTexture = true;
+        }
+#endif
 
     #ifdef UNLEASHED_RECOMP
         if (!isPixelShader)
@@ -1518,8 +1530,42 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             auto value = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + definition->physicalOffset);
             for (uint16_t i = 0; i < (definition->count + 3) / 4; i++)
             {
+#ifdef REBLUE_RECOMP
+                // BD bakes the sun-shadow receiver PCF tap offsets as shader
+                // literals in 1/1024-of-the-map UV units, folded into 0.5+k
+                // and 1.0+k anchors plus the raw 1/1024 frac-stagger stride.
+                // Their world footprint scales with the shadow coverage box
+                // (bd_shadow_distance), so re-anchor each such component on
+                // g_ShadowPcfScale (SharedConstants c20.z, byte 328, =
+                // max(1/distance, 1024/dimension)). Bit-exact identity at
+                // scale 1.0. Gated to pixel shaders sampling ShadowTexture;
+                // the +/-3/1024 window (anchors excluded) matches exactly the
+                // kernel literals across every BD receiver and nothing else.
+                auto shadowKernelComponent = [&](uint32_t u) -> std::string
+                {
+                    if (hasShadowTexture)
+                    {
+                        if (u == 0x3A800000)
+                            return fmt::format("(asfloat(0x{:X}u) * g_ShadowPcfScale)", u);
+                        float f;
+                        memcpy(&f, &u, sizeof(f));
+                        for (float anchor : { 0.5f, 1.0f })
+                        {
+                            float d = f > anchor ? f - anchor : anchor - f;
+                            if (f != anchor && d <= 3.0f / 1024.0f)
+                                return fmt::format("({} + (asfloat(0x{:X}u) - {}) * g_ShadowPcfScale)", anchor, u, anchor);
+                        }
+                    }
+                    return fmt::format("asfloat(0x{:X}u)", u);
+                };
+                println("\tfloat4 c{} = float4({}, {}, {}, {});",
+                    definition->registerIndex + i - (isPixelShader ? 256 : 0),
+                    shadowKernelComponent(value[0].get()), shadowKernelComponent(value[1].get()),
+                    shadowKernelComponent(value[2].get()), shadowKernelComponent(value[3].get()));
+#else
                 println("\tfloat4 c{} = asfloat(uint4(0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}));",
                     definition->registerIndex + i - (isPixelShader ? 256 : 0), value[0].get(), value[1].get(), value[2].get(), value[3].get());
+#endif
 
                 value += 4;
             }

@@ -43,6 +43,7 @@ struct PushConstants
 #define g_SwappedBlendWeights      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 316)
 #define g_SwappedPositions         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 320)
 #define g_SintTexcoords            vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 324)
+#define g_ShadowPcfScale           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 328)
 #else
 #define g_Booleans                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256)
 #define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
@@ -67,7 +68,8 @@ struct PushConstants
     uint g_SwappedTangents : packoffset(c19.z); \
     uint g_SwappedBlendWeights : packoffset(c19.w); \
     uint g_SwappedPositions : packoffset(c20.x); \
-    uint g_SintTexcoords : packoffset(c20.y);
+    uint g_SintTexcoords : packoffset(c20.y); \
+    float g_ShadowPcfScale : packoffset(c20.z);
 
 #define g_Booleans(i) (g_BooleansArr[(i) / 4][(i) % 4])
 #else
