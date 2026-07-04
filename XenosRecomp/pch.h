@@ -6,16 +6,20 @@
 
 #include <dxcapi.h>
 
+#include <algorithm>
 #include <bit>
 #include <cassert>
 #include <cstdint>
 #include <execution>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <smolv.h>
 #include <fmt/core.h>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <xxhash.h>
 #include <zstd.h>
 

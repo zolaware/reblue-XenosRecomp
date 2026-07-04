@@ -32,6 +32,9 @@ struct ShaderRecompiler : StringBuffer
     std::unordered_map<uint32_t, const char*> boolConstants;
     std::unordered_map<uint32_t, const char*> samplers;
     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
+    // Structured if/else emission: instruction indices where a "} else {" is
+    // emitted (then-branch close is part of the event, not ifEndLabels).
+    std::unordered_set<uint32_t> elseLabels;
     uint32_t specConstantsMask = 0;
 
 #ifdef UNLEASHED_RECOMP
