@@ -1423,7 +1423,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         out += "\tin float4 iPos : SV_Position,\n";
 
         for (auto& [usage, usageIndex] : INTERPOLATORS)
-            println("\tin float4 i{0}{1} : {2}{1},", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
+        {
+#ifdef REBLUE_RECOMP
+            const char* interpolation = (usage == DeclUsage::Color) ? "centroid " : "";
+#else
+            const char* interpolation = "";
+#endif
+            println("\tin {3}float4 i{0}{1} : {2}{1},", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)], interpolation);
+        }
 
         out += "#ifdef __spirv__\n";
         out += "\tin bool iFace : SV_IsFrontFace\n";
