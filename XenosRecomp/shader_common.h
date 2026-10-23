@@ -55,6 +55,9 @@ struct PushConstants
 #define g_SwappedPositions         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 320)
 #define g_SintTexcoords            vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 324)
 #define g_ShadowPcfScale           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 328)
+#define g_PixelScaleInv            vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 344)
+#define g_ScaledFetchSlots         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 352)
+#define g_FetchScale               vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 356)
 #else
 #define g_Booleans                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256)
 #define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
@@ -80,7 +83,10 @@ struct PushConstants
     uint g_SwappedBlendWeights : packoffset(c19.w); \
     uint g_SwappedPositions : packoffset(c20.x); \
     uint g_SintTexcoords : packoffset(c20.y); \
-    float g_ShadowPcfScale : packoffset(c20.z);
+    float g_ShadowPcfScale : packoffset(c20.z); \
+    float2 g_PixelScaleInv : packoffset(c21.z); \
+    uint g_ScaledFetchSlots : packoffset(c22.x); \
+    float2 g_FetchScale : packoffset(c22.y);
 
 #define g_Booleans(i) (g_BooleansArr[(i) / 4][(i) % 4])
 #else
@@ -98,6 +104,9 @@ uint g_SpecConstants();
 #ifdef REBLUE_RECOMP
 // Test Xenos boolean register N in the unified VS(0..127)/PS(128..255) file.
 #define BOOL_BIT(n) ((g_Booleans((n) / 32u) & (1u << ((n) & 31u))) != 0)
+
+// Fetch offsets are in logical texels, so a texture the host allocated larger gets them scaled up.
+#define FETCH_OFFSET_SCALE(slot) (((g_ScaledFetchSlots >> (slot)) & 1u) != 0 ? g_FetchScale : float2(1.0, 1.0))
 #endif
 
 Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
